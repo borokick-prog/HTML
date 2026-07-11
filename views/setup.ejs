@@ -1,0 +1,22 @@
+<%- include('partials/header', { title, hideNav }) %>
+
+<div class="auth-card">
+  <h1>Welcome</h1>
+  <p class="muted">Set an admin password to protect your dashboard. You'll use this to log in from now on.</p>
+
+  <% if (error) { %>
+    <div class="alert alert-error"><%= error %></div>
+  <% } %>
+
+  <form method="POST" action="/setup">
+    <label for="password">Admin password</label>
+    <input type="password" id="password" name="password" minlength="8" required autofocus>
+
+    <label for="confirmPassword">Confirm password</label>
+    <input type="password" id="confirmPassword" name="confirmPassword" minlength="8" required>
+
+    <button type="submit" class="btn btn-primary">Create admin account</button>
+  </form>
+</div>
+
+<%- include('partials/footer') %>

@@ -1,0 +1,51 @@
+<%- include('../partials/header', { title }) %>
+
+<div class="form-card">
+  <h1>Edit document</h1>
+
+  <% if (error) { %><div class="alert alert-error"><%= error %></div><% } %>
+
+  <form method="POST" action="/dashboard/documents/<%= doc.id %>" enctype="multipart/form-data">
+    <label for="title">Title</label>
+    <input type="text" id="title" name="title" value="<%= doc.title || '' %>" required>
+
+    <label for="slug">Slug</label>
+    <input type="text" id="slug" name="slug" value="<%= doc.slug || '' %>" required>
+    <p class="hint">Currently live at /<%= doc.slug %>. Changing this breaks any shared links.</p>
+
+    <label for="folderId">Folder</label>
+    <select id="folderId" name="folderId">
+      <option value="">Uncategorized</option>
+      <% folders.forEach(function(f) { %>
+        <option value="<%= f.id %>" <%= String(doc.folder_id) === String(f.id) ? 'selected' : '' %>><%= f.name %></option>
+      <% }) %>
+    </select>
+
+    <label for="file">Replace file (optional)</label>
+    <input type="file" id="file" name="file" accept=".html,.htm,text/html">
+    <p class="hint">Current file: <%= doc.original_filename || doc.filename %></p>
+
+    <label for="password">
+      <%= doc.password_hash ? 'Set a new password' : 'Set a viewer password' %> (optional)
+    </label>
+    <input type="password" id="password" name="password" placeholder="Leave blank to keep current" autocomplete="new-password">
+
+    <% if (doc.password_hash) { %>
+      <label class="checkbox-label">
+        <input type="checkbox" name="clearPassword">
+        Remove password protection
+      </label>
+    <% } %>
+
+    <label for="expiresAt">Expiry date (optional)</label>
+    <input type="date" id="expiresAt" name="expiresAt" value="<%= doc.expires_at ? doc.expires_at.slice(0, 10) : '' %>">
+    <p class="hint">Leave blank to remove the expiry date.</p>
+
+    <div class="form-actions">
+      <a href="/dashboard" class="btn btn-secondary">Cancel</a>
+      <button type="submit" class="btn btn-primary">Save changes</button>
+    </div>
+  </form>
+</div>
+
+<%- include('../partials/footer') %>

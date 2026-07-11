@@ -1,0 +1,77 @@
+<%- include('../partials/header', { title }) %>
+
+<div class="dash-layout">
+  <aside class="sidebar">
+    <h3>Folders</h3>
+    <ul class="folder-list">
+      <li class="<%= !activeFolder ? 'active' : '' %>"><a href="/dashboard">All documents</a></li>
+      <li class="<%= activeFolder === 'none' ? 'active' : '' %>"><a href="/dashboard?folder=none">Uncategorized</a></li>
+      <% folders.forEach(function(f) { %>
+        <li class="<%= String(activeFolder) === String(f.id) ? 'active' : '' %>">
+          <a href="/dashboard?folder=<%= f.id %>"><%= f.name %></a>
+          <div class="folder-actions">
+            <form method="POST" action="/dashboard/folders/<%= f.id %>/rename" class="inline-form">
+              <input type="text" name="name" value="<%= f.name %>" class="tiny-input" required>
+              <button type="submit" class="link-button" title="Rename">✓</button>
+            </form>
+            <form method="POST" action="/dashboard/folders/<%= f.id %>/delete" class="inline-form" data-confirm="Delete this folder? Documents inside will become Uncategorized.">
+              <button type="submit" class="link-button danger" title="Delete folder">✕</button>
+            </form>
+          </div>
+        </li>
+      <% }) %>
+    </ul>
+
+    <form method="POST" action="/dashboard/folders" class="new-folder-form">
+      <input type="text" name="name" placeholder="New folder name" required>
+      <button type="submit" class="btn btn-small">Add</button>
+    </form>
+  </aside>
+
+  <section class="content">
+    <div class="content-header">
+      <h1>Documents</h1>
+      <a href="/dashboard/documents/new" class="btn btn-primary">Upload HTML file</a>
+    </div>
+
+    <% if (success) { %><div class="alert alert-success"><%= success %></div><% } %>
+    <% if (error) { %><div class="alert alert-error"><%= error %></div><% } %>
+
+    <% if (docs.length === 0) { %>
+      <p class="muted">No documents yet. Upload your first HTML file to get started.</p>
+    <% } else { %>
+      <table class="doc-table">
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Slug</th>
+            <th>Status</th>
+            <th>Folder</th>
+            <th>Expires</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <% docs.forEach(function(doc) { %>
+            <tr>
+              <td><%= doc.title %></td>
+              <td><a href="/<%= doc.slug %>" target="_blank" rel="noopener">/<%= doc.slug %></a></td>
+              <td><span class="badge badge-<%= doc.status %>"><%= doc.status %></span></td>
+              <td><%= (folders.find(f => f.id === doc.folder_id) || {}).name || '—' %></td>
+              <td><%= doc.expires_at ? new Date(doc.expires_at).toLocaleDateString() : '—' %></td>
+              <td class="row-actions">
+                <a href="/dashboard/documents/<%= doc.id %>/edit">Edit</a>
+                <form method="POST" action="/dashboard/documents/<%= doc.id %>/delete" class="inline-form" data-confirm="Delete this document? This cannot be undone.">
+                  <button type="submit" class="link-button danger">Delete</button>
+                </form>
+              </td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    <% } %>
+  </section>
+</div>
+
+<%- include('../partials/footer') %>
+<script src="/static/js/dashboard.js"></script>

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= typeof title !== 'undefined' ? title : 'HTML Doc Manager' %></title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<% if (typeof hideNav === 'undefined' || !hideNav) { %>
+  <nav class="topnav">
+    <a class="brand" href="/dashboard">HTML Doc Manager</a>
+    <div class="nav-links">
+      <a href="/dashboard">Documents</a>
+      <a href="/dashboard/settings">Settings</a>
+      <form method="POST" action="/logout" class="inline-form">
+        <button type="submit" class="link-button">Log out</button>
+      </form>
+    </div>
+  </nav>
+<% } %>
+<main class="container">
