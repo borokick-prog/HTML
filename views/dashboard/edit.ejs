@@ -23,7 +23,7 @@
 
     <label for="file">Replace file (optional)</label>
     <input type="file" id="file" name="file" accept=".html,.htm,text/html">
-    <p class="hint">Current file: <%= doc.original_filename || doc.filename %></p>
+    <p class="hint">Current file: <%= doc.original_filename || 'unnamed.html' %></p>
 
     <label for="password">
       <%= doc.password_hash ? 'Set a new password' : 'Set a viewer password' %> (optional)

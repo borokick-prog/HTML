@@ -1,13 +1,17 @@
 const { getSetting } = require('./db');
 
-function requireSetup(req, res, next) {
-  const configured = !!getSetting('admin_password_hash');
-  if (req.path === '/setup') {
-    if (configured) return res.redirect('/login');
-    return next();
+async function requireSetup(req, res, next) {
+  try {
+    const configured = !!(await getSetting('admin_password_hash'));
+    if (req.path === '/setup') {
+      if (configured) return res.redirect('/login');
+      return next();
+    }
+    if (!configured) return res.redirect('/setup');
+    next();
+  } catch (err) {
+    next(err);
   }
-  if (!configured) return res.redirect('/setup');
-  next();
 }
 
 function requireAdmin(req, res, next) {

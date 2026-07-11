@@ -1,7 +1,9 @@
 const path = require('path');
 const express = require('express');
 const session = require('express-session');
+const pgSession = require('connect-pg-simple')(session);
 
+const { pool, ensureSchema } = require('./db');
 const { requireSetup } = require('./middleware');
 const authRoutes = require('./routes/auth');
 const dashboardRoutes = require('./routes/dashboard');
@@ -23,16 +25,27 @@ if (!process.env.SESSION_SECRET) {
   );
 }
 
+// Serverless: each cold start needs our tables to exist before any route
+// touches the database. Cached after the first successful run.
+app.use((req, res, next) => {
+  ensureSchema().then(() => next(), next);
+});
+
+// Vercel always terminates TLS in front of the function, so cookies can
+// safely be marked Secure there without an extra env var.
+const secureCookie = !!process.env.VERCEL || process.env.TRUST_SECURE_COOKIE === 'true';
+
 app.use(
   session({
     name: 'htmldocs.sid',
     secret: process.env.SESSION_SECRET || 'dev-insecure-secret-change-me',
+    store: new pgSession({ pool, tableName: 'session', createTableIfMissing: true }),
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
       sameSite: 'strict',
-      secure: process.env.NODE_ENV === 'production' && process.env.TRUST_SECURE_COOKIE === 'true',
+      secure: secureCookie,
       maxAge: 1000 * 60 * 60 * 24 * 7,
     },
   })

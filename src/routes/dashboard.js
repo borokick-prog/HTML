@@ -1,10 +1,7 @@
-const path = require('path');
-const fs = require('fs');
-const crypto = require('crypto');
 const express = require('express');
 const multer = require('multer');
 
-const { db, getSetting, setSetting } = require('../db');
+const { pool, getSetting, setSetting } = require('../db');
 const { hashPassword, verifyPassword } = require('../auth');
 const { validateSlug, slugify } = require('../slug');
 const { requireAdmin } = require('../middleware');
@@ -12,17 +9,13 @@ const { requireAdmin } = require('../middleware');
 const router = express.Router();
 router.use(requireAdmin);
 
-const UPLOAD_DIR = path.join(__dirname, '..', '..', 'uploads');
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
+// Vercel's Hobby plan caps serverless request bodies at ~4.5MB, so the
+// uploaded file (held in memory, never touching disk) is kept under that.
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-    filename: (req, file, cb) => cb(null, `${crypto.randomUUID()}.html`),
-  }),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 4 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
+    const ext = (file.originalname.match(/\.[^.]+$/) || [''])[0].toLowerCase();
     if (ext !== '.html' && ext !== '.htm') {
       return cb(new Error('Only .html or .htm files are allowed.'));
     }
@@ -43,217 +36,224 @@ function docStatus(doc) {
   return 'active';
 }
 
-function getFolders() {
-  return db.prepare('SELECT * FROM folders ORDER BY name COLLATE NOCASE').all();
+async function getFolders() {
+  const { rows } = await pool.query('SELECT * FROM folders ORDER BY lower(name)');
+  return rows;
 }
 
-function getDocument(id) {
-  return db.prepare('SELECT * FROM documents WHERE id = ?').get(id);
-}
-
-function deleteDocFile(doc) {
-  const filePath = path.join(UPLOAD_DIR, doc.filename);
-  fs.promises.unlink(filePath).catch(() => {});
+async function getDocument(id) {
+  const numericId = Number(id);
+  if (!Number.isInteger(numericId)) return undefined;
+  const { rows } = await pool.query('SELECT * FROM documents WHERE id = $1', [numericId]);
+  return rows[0];
 }
 
 // ---- Dashboard home / document list ----
 
-router.get('/', (req, res) => {
-  const folderId = req.query.folder ? Number(req.query.folder) : null;
-  const folders = getFolders();
+router.get('/', async (req, res, next) => {
+  try {
+    const folders = await getFolders();
 
-  let docs;
-  if (folderId) {
-    docs = db.prepare('SELECT * FROM documents WHERE folder_id = ? ORDER BY updated_at DESC').all(folderId);
-  } else if (req.query.folder === 'none') {
-    docs = db.prepare('SELECT * FROM documents WHERE folder_id IS NULL ORDER BY updated_at DESC').all();
-  } else {
-    docs = db.prepare('SELECT * FROM documents ORDER BY updated_at DESC').all();
+    let docs;
+    if (req.query.folder === 'none') {
+      docs = (await pool.query('SELECT * FROM documents WHERE folder_id IS NULL ORDER BY updated_at DESC')).rows;
+    } else if (req.query.folder) {
+      docs = (
+        await pool.query('SELECT * FROM documents WHERE folder_id = $1 ORDER BY updated_at DESC', [Number(req.query.folder)])
+      ).rows;
+    } else {
+      docs = (await pool.query('SELECT * FROM documents ORDER BY updated_at DESC')).rows;
+    }
+
+    const docsWithStatus = docs.map((d) => ({ ...d, status: docStatus(d) }));
+
+    res.render('dashboard/index', {
+      title: 'Documents',
+      docs: docsWithStatus,
+      folders,
+      activeFolder: req.query.folder || null,
+      error: req.query.error || null,
+      success: req.query.success || null,
+    });
+  } catch (err) {
+    next(err);
   }
-
-  const docsWithStatus = docs.map((d) => ({ ...d, status: docStatus(d) }));
-
-  res.render('dashboard/index', {
-    title: 'Documents',
-    docs: docsWithStatus,
-    folders,
-    activeFolder: req.query.folder || null,
-    error: req.query.error || null,
-    success: req.query.success || null,
-  });
 });
 
 // ---- New document ----
 
-router.get('/documents/new', (req, res) => {
-  res.render('dashboard/new', {
-    title: 'Upload document',
-    folders: getFolders(),
-    error: null,
-    form: {},
-  });
+router.get('/documents/new', async (req, res, next) => {
+  try {
+    res.render('dashboard/new', {
+      title: 'Upload document',
+      folders: await getFolders(),
+      error: null,
+      form: {},
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.post('/documents', (req, res) => {
-  upload.single('file')(req, res, (err) => {
-    if (err) {
-      return res.render('dashboard/new', {
-        title: 'Upload document',
-        folders: getFolders(),
-        error: err.message,
-        form: req.body,
-      });
+router.post('/documents', (req, res, next) => {
+  upload.single('file')(req, res, async (err) => {
+    try {
+      const folders = await getFolders();
+
+      if (err) {
+        return res.render('dashboard/new', { title: 'Upload document', folders, error: err.message, form: req.body });
+      }
+
+      const { title, folderId, password, expiresAt } = req.body;
+      const slug = slugify(req.body.slug || '');
+
+      const renderError = (message) =>
+        res.render('dashboard/new', { title: 'Upload document', folders, error: message, form: req.body });
+
+      if (!req.file) return renderError('Please choose an HTML file to upload.');
+      if (!title || !title.trim()) return renderError('Title is required.');
+
+      const slugError = validateSlug(slug);
+      if (slugError) return renderError(slugError);
+
+      const { rows: existingRows } = await pool.query('SELECT id FROM documents WHERE slug = $1', [slug]);
+      if (existingRows[0]) return renderError(`Slug "${slug}" is already in use.`);
+
+      const now = new Date().toISOString();
+      const passwordHash = password && password.trim() ? hashPassword(password.trim()) : null;
+      const expiresIso = toEndOfDayIso(expiresAt);
+      const content = req.file.buffer.toString('utf8');
+
+      await pool.query(
+        `INSERT INTO documents (slug, title, content, original_filename, folder_id, password_hash, expires_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [slug, title.trim(), content, req.file.originalname, folderId ? Number(folderId) : null, passwordHash, expiresIso, now, now]
+      );
+
+      res.redirect('/dashboard?success=' + encodeURIComponent(`"${title.trim()}" uploaded to /${slug}`));
+    } catch (queryErr) {
+      next(queryErr);
     }
-
-    const { title, folderId, password, expiresAt } = req.body;
-    let slug = slugify(req.body.slug || '');
-
-    const renderError = (message) => {
-      if (req.file) fs.promises.unlink(req.file.path).catch(() => {});
-      return res.render('dashboard/new', {
-        title: 'Upload document',
-        folders: getFolders(),
-        error: message,
-        form: req.body,
-      });
-    };
-
-    if (!req.file) return renderError('Please choose an HTML file to upload.');
-    if (!title || !title.trim()) return renderError('Title is required.');
-
-    const slugError = validateSlug(slug);
-    if (slugError) return renderError(slugError);
-
-    const existing = db.prepare('SELECT id FROM documents WHERE slug = ?').get(slug);
-    if (existing) return renderError(`Slug "${slug}" is already in use.`);
-
-    const now = new Date().toISOString();
-    const passwordHash = password && password.trim() ? hashPassword(password.trim()) : null;
-    const expiresIso = toEndOfDayIso(expiresAt);
-
-    db.prepare(
-      `INSERT INTO documents (slug, title, filename, original_filename, folder_id, password_hash, expires_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      slug,
-      title.trim(),
-      req.file.filename,
-      req.file.originalname,
-      folderId ? Number(folderId) : null,
-      passwordHash,
-      expiresIso,
-      now,
-      now
-    );
-
-    res.redirect('/dashboard?success=' + encodeURIComponent(`"${title.trim()}" uploaded to /${slug}`));
   });
 });
 
 // ---- Edit document ----
 
-router.get('/documents/:id/edit', (req, res) => {
-  const doc = getDocument(req.params.id);
-  if (!doc) return res.redirect('/dashboard?error=Document+not+found');
-  res.render('dashboard/edit', {
-    title: `Edit ${doc.title}`,
-    doc,
-    folders: getFolders(),
-    error: null,
+router.get('/documents/:id/edit', async (req, res, next) => {
+  try {
+    const doc = await getDocument(req.params.id);
+    if (!doc) return res.redirect('/dashboard?error=Document+not+found');
+    res.render('dashboard/edit', {
+      title: `Edit ${doc.title}`,
+      doc,
+      folders: await getFolders(),
+      error: null,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/documents/:id', (req, res, next) => {
+  upload.single('file')(req, res, async (err) => {
+    try {
+      const doc = await getDocument(req.params.id);
+      if (!doc) return res.redirect('/dashboard?error=Document+not+found');
+
+      const folders = await getFolders();
+
+      if (err) {
+        return res.render('dashboard/edit', { title: `Edit ${doc.title}`, doc, folders, error: err.message });
+      }
+
+      const { title, folderId, password, clearPassword, expiresAt } = req.body;
+      const slug = slugify(req.body.slug || '');
+
+      const renderError = (message) =>
+        res.render('dashboard/edit', { title: `Edit ${doc.title}`, doc: { ...doc, ...req.body }, folders, error: message });
+
+      if (!title || !title.trim()) return renderError('Title is required.');
+
+      const slugError = validateSlug(slug);
+      if (slugError) return renderError(slugError);
+
+      const { rows: existingRows } = await pool.query('SELECT id FROM documents WHERE slug = $1 AND id != $2', [slug, doc.id]);
+      if (existingRows[0]) return renderError(`Slug "${slug}" is already in use.`);
+
+      let passwordHash = doc.password_hash;
+      if (clearPassword === 'on') {
+        passwordHash = null;
+      } else if (password && password.trim()) {
+        passwordHash = hashPassword(password.trim());
+      }
+
+      const expiresIso = expiresAt ? toEndOfDayIso(expiresAt) : null;
+
+      let content = doc.content;
+      let originalFilename = doc.original_filename;
+      if (req.file) {
+        content = req.file.buffer.toString('utf8');
+        originalFilename = req.file.originalname;
+      }
+
+      await pool.query(
+        `UPDATE documents SET title = $1, slug = $2, folder_id = $3, password_hash = $4, expires_at = $5, content = $6, original_filename = $7, updated_at = $8
+         WHERE id = $9`,
+        [title.trim(), slug, folderId ? Number(folderId) : null, passwordHash, expiresIso, content, originalFilename, new Date().toISOString(), doc.id]
+      );
+
+      res.redirect('/dashboard?success=' + encodeURIComponent(`"${title.trim()}" updated`));
+    } catch (queryErr) {
+      next(queryErr);
+    }
   });
 });
 
-router.post('/documents/:id', (req, res) => {
-  upload.single('file')(req, res, (err) => {
-    const doc = getDocument(req.params.id);
+router.post('/documents/:id/delete', async (req, res, next) => {
+  try {
+    const doc = await getDocument(req.params.id);
     if (!doc) return res.redirect('/dashboard?error=Document+not+found');
 
-    if (err) {
-      return res.render('dashboard/edit', { title: `Edit ${doc.title}`, doc, folders: getFolders(), error: err.message });
-    }
-
-    const { title, folderId, password, clearPassword, expiresAt } = req.body;
-    let slug = slugify(req.body.slug || '');
-
-    const renderError = (message) => {
-      if (req.file) fs.promises.unlink(req.file.path).catch(() => {});
-      return res.render('dashboard/edit', { title: `Edit ${doc.title}`, doc: { ...doc, ...req.body }, folders: getFolders(), error: message });
-    };
-
-    if (!title || !title.trim()) return renderError('Title is required.');
-
-    const slugError = validateSlug(slug);
-    if (slugError) return renderError(slugError);
-
-    const existing = db.prepare('SELECT id FROM documents WHERE slug = ? AND id != ?').get(slug, doc.id);
-    if (existing) return renderError(`Slug "${slug}" is already in use.`);
-
-    let passwordHash = doc.password_hash;
-    if (clearPassword === 'on') {
-      passwordHash = null;
-    } else if (password && password.trim()) {
-      passwordHash = hashPassword(password.trim());
-    }
-
-    const expiresIso = expiresAt ? toEndOfDayIso(expiresAt) : null;
-
-    let filename = doc.filename;
-    let originalFilename = doc.original_filename;
-    if (req.file) {
-      deleteDocFile(doc);
-      filename = req.file.filename;
-      originalFilename = req.file.originalname;
-    }
-
-    db.prepare(
-      `UPDATE documents SET title = ?, slug = ?, folder_id = ?, password_hash = ?, expires_at = ?, filename = ?, original_filename = ?, updated_at = ?
-       WHERE id = ?`
-    ).run(
-      title.trim(),
-      slug,
-      folderId ? Number(folderId) : null,
-      passwordHash,
-      expiresIso,
-      filename,
-      originalFilename,
-      new Date().toISOString(),
-      doc.id
-    );
-
-    res.redirect('/dashboard?success=' + encodeURIComponent(`"${title.trim()}" updated`));
-  });
-});
-
-router.post('/documents/:id/delete', (req, res) => {
-  const doc = getDocument(req.params.id);
-  if (!doc) return res.redirect('/dashboard?error=Document+not+found');
-
-  deleteDocFile(doc);
-  db.prepare('DELETE FROM documents WHERE id = ?').run(doc.id);
-  res.redirect('/dashboard?success=' + encodeURIComponent(`"${doc.title}" deleted`));
+    await pool.query('DELETE FROM documents WHERE id = $1', [doc.id]);
+    res.redirect('/dashboard?success=' + encodeURIComponent(`"${doc.title}" deleted`));
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ---- Folders ----
 
-router.post('/folders', (req, res) => {
-  const name = (req.body.name || '').trim();
-  if (!name) return res.redirect('/dashboard?error=Folder+name+is+required');
+router.post('/folders', async (req, res, next) => {
+  try {
+    const name = (req.body.name || '').trim();
+    if (!name) return res.redirect('/dashboard?error=Folder+name+is+required');
 
-  db.prepare('INSERT INTO folders (name, created_at) VALUES (?, ?)').run(name, new Date().toISOString());
-  res.redirect('/dashboard?success=' + encodeURIComponent(`Folder "${name}" created`));
+    await pool.query('INSERT INTO folders (name, created_at) VALUES ($1, $2)', [name, new Date().toISOString()]);
+    res.redirect('/dashboard?success=' + encodeURIComponent(`Folder "${name}" created`));
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.post('/folders/:id/rename', (req, res) => {
-  const name = (req.body.name || '').trim();
-  if (!name) return res.redirect('/dashboard?error=Folder+name+is+required');
+router.post('/folders/:id/rename', async (req, res, next) => {
+  try {
+    const name = (req.body.name || '').trim();
+    if (!name) return res.redirect('/dashboard?error=Folder+name+is+required');
 
-  db.prepare('UPDATE folders SET name = ? WHERE id = ?').run(name, req.params.id);
-  res.redirect('/dashboard?success=' + encodeURIComponent('Folder renamed'));
+    await pool.query('UPDATE folders SET name = $1 WHERE id = $2', [name, Number(req.params.id)]);
+    res.redirect('/dashboard?success=' + encodeURIComponent('Folder renamed'));
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.post('/folders/:id/delete', (req, res) => {
-  db.prepare('DELETE FROM folders WHERE id = ?').run(req.params.id);
-  res.redirect('/dashboard?success=' + encodeURIComponent('Folder deleted (documents moved to Uncategorized)'));
+router.post('/folders/:id/delete', async (req, res, next) => {
+  try {
+    await pool.query('DELETE FROM folders WHERE id = $1', [Number(req.params.id)]);
+    res.redirect('/dashboard?success=' + encodeURIComponent('Folder deleted (documents moved to Uncategorized)'));
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ---- Settings ----
@@ -262,22 +262,26 @@ router.get('/settings', (req, res) => {
   res.render('dashboard/settings', { title: 'Settings', error: null, success: null });
 });
 
-router.post('/settings/password', (req, res) => {
-  const { currentPassword, newPassword, confirmPassword } = req.body;
-  const stored = getSetting('admin_password_hash');
+router.post('/settings/password', async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword, confirmPassword } = req.body;
+    const stored = await getSetting('admin_password_hash');
 
-  if (!verifyPassword(currentPassword || '', stored)) {
-    return res.render('dashboard/settings', { title: 'Settings', error: 'Current password is incorrect.', success: null });
-  }
-  if (!newPassword || newPassword.length < 8) {
-    return res.render('dashboard/settings', { title: 'Settings', error: 'New password must be at least 8 characters.', success: null });
-  }
-  if (newPassword !== confirmPassword) {
-    return res.render('dashboard/settings', { title: 'Settings', error: 'New passwords do not match.', success: null });
-  }
+    if (!verifyPassword(currentPassword || '', stored)) {
+      return res.render('dashboard/settings', { title: 'Settings', error: 'Current password is incorrect.', success: null });
+    }
+    if (!newPassword || newPassword.length < 8) {
+      return res.render('dashboard/settings', { title: 'Settings', error: 'New password must be at least 8 characters.', success: null });
+    }
+    if (newPassword !== confirmPassword) {
+      return res.render('dashboard/settings', { title: 'Settings', error: 'New passwords do not match.', success: null });
+    }
 
-  setSetting('admin_password_hash', hashPassword(newPassword));
-  res.render('dashboard/settings', { title: 'Settings', error: null, success: 'Password updated.' });
+    await setSetting('admin_password_hash', hashPassword(newPassword));
+    res.render('dashboard/settings', { title: 'Settings', error: null, success: 'Password updated.' });
+  } catch (err) {
+    next(err);
+  }
 });
 
 module.exports = router;
