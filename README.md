@@ -46,9 +46,11 @@ are created automatically on first run.
 1. Push this repo to GitHub and import it into Vercel (or run `vercel` from
    this directory).
 2. In the Vercel project, add a Postgres integration under **Storage**
-   (Neon or Supabase both work) — this sets `DATABASE_URL`/`POSTGRES_URL`
-   automatically. If your provider only sets `POSTGRES_URL`, also add
-   `DATABASE_URL` in **Settings → Environment Variables** with the same value.
+   (Neon or Supabase both work). The app reads `DATABASE_URL`, `POSTGRES_URL`,
+   `POSTGRES_PRISMA_URL`, or `POSTGRES_URL_NON_POOLING` — whichever your
+   integration sets — so no extra step is needed here. Make sure the
+   variables are enabled for the environment you're deploying (Production
+   and/or Preview) under **Settings → Environment Variables**.
 3. Add a `SESSION_SECRET` environment variable (see command above).
 4. Deploy. `vercel.json` routes every request through `api/index.js`, which
    is the same Express app used locally — `server.js` is only for local dev.

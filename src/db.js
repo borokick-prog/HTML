@@ -1,8 +1,18 @@
 const { Pool } = require('pg');
 
-const connectionString = process.env.DATABASE_URL;
+// Vercel's Postgres marketplace integrations (Supabase, Neon) name the
+// connection string POSTGRES_URL rather than DATABASE_URL, so accept either.
+// Prefer the pooled variant when a provider exposes both.
+const connectionString =
+  process.env.DATABASE_URL ||
+  process.env.POSTGRES_URL ||
+  process.env.POSTGRES_PRISMA_URL ||
+  process.env.POSTGRES_URL_NON_POOLING;
+
 if (!connectionString) {
-  throw new Error('DATABASE_URL is not set. Point it at a Postgres database (e.g. Neon, Supabase, Railway).');
+  throw new Error(
+    'No Postgres connection string found. Set DATABASE_URL (or connect a Postgres integration that provides POSTGRES_URL) in your environment variables.'
+  );
 }
 
 // Local/self-hosted Postgres typically doesn't use TLS; managed providers
