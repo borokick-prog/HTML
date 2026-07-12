@@ -4,6 +4,10 @@ const { hashPassword, verifyPassword } = require('../auth');
 
 const router = express.Router();
 
+router.get('/', (req, res) => {
+  res.redirect(req.session && req.session.isAdmin ? '/dashboard' : '/login');
+});
+
 router.get('/setup', async (req, res, next) => {
   try {
     if (await getSetting('admin_password_hash')) return res.redirect('/login');
