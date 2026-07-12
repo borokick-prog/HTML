@@ -16,11 +16,26 @@ if (!connectionString) {
 }
 
 // Local/self-hosted Postgres typically doesn't use TLS; managed providers
-// (Neon, Supabase, Railway, Vercel Postgres) require it.
+// (Neon, Supabase, Railway, Vercel Postgres) require it, often behind a
+// certificate chain Node won't validate out of the box.
 const isLocal = /localhost|127\.0\.0\.1/.test(connectionString);
 
+// pg re-parses `connectionString` internally and that parsed result can
+// silently clobber a same-level `ssl` option, so encode "don't verify the
+// chain" directly into the string via sslmode=no-verify instead of relying
+// on the ssl object alone.
+function withNoVerifySsl(raw) {
+  try {
+    const url = new URL(raw);
+    url.searchParams.set('sslmode', 'no-verify');
+    return url.toString();
+  } catch {
+    return raw;
+  }
+}
+
 const pool = new Pool({
-  connectionString,
+  connectionString: isLocal ? connectionString : withNoVerifySsl(connectionString),
   ssl: isLocal ? false : { rejectUnauthorized: false },
 });
 
